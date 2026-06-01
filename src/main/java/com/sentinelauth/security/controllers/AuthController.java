@@ -54,7 +54,6 @@ public class AuthController {
 	public ResponseEntity<?> login(@Valid @RequestBody LoginRequestDTO loginRequest,
 	                               @RequestHeader(value = "X-Forwarded-For", defaultValue = "unknown") String ip) {
 		
-		// AppSec: Proteção contra Brute Force via Rate Limiting
 		if (!rateLimitingService.resolveBucket(ip).tryConsume(1)) {
 			return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body("Muitas tentativas. Tente novamente em 1 minuto.");
 		}
@@ -62,18 +61,12 @@ public class AuthController {
 		return userRepository.findByEmail(loginRequest.getEmail())
 				.map(user -> {
 					if (passwordEncoder.matches(loginRequest.getPassword(), user.getPasswordHash())) {
-						
-						// Fluxo MFA Ativo
 						if (user.isMfaEnabled()) {
 							String code = mfaService.generateEmailCode(user.getEmail());
 							emailService.sendMfaCode(user.getEmail(), code);
-							
-							// Gera um token temporário (curta duração) para autorizar a rota /verify
 							String tempToken = jwtService.generateToken(user.getEmail());
 							return ResponseEntity.ok(LoginResponseDTO.mfaPending(tempToken));
 						}
-						
-						// Fluxo Sem MFA: Entrega tokens definitivos imediatamente
 						return generateFullAuthResponse(user.getEmail());
 					}
 					return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Credenciais inválidas.");
@@ -165,15 +158,27 @@ public class AuthController {
 	
 	@PostMapping("/mfa/toggle")
 	public ResponseEntity<?> toggleMfa(@RequestHeader("Authorization") String authHeader) {
-		String token = authHeader.replace("Bearer ", "");
-		String email = jwtService.extractUsername(token);
-		
-		return userRepository.findByEmail(email).map(user -> {
-			user.setMfaEnabled(!user.isMfaEnabled());
-			userRepository.save(user);
-			String status = user.isMfaEnabled() ? "ativado" : "desativado";
-			return ResponseEntity.ok("MFA " + status + " com sucesso.");
-		}).orElse(ResponseEntity.status(HttpStatus.NOT_FOUND).build());
+		try {
+			String token = authHeader.replace("Bearer ", "");
+			String email = jwtService.extractUsername(token);
+			
+			logger.info("[AppSec] Tentativa de toggle MFA para: {}", email);
+			
+			return userRepository.findByEmail(email).map(user -> {
+				user.setMfaEnabled(!user.isMfaEnabled());
+				userRepository.save(user);
+				String status = user.isMfaEnabled() ? "ativado" : "desativado";
+				logger.info("[AppSec] MFA {} para: {}", status, email);
+				return ResponseEntity.ok(Map.of("message", "MFA " + status + " com sucesso.", "mfaEnabled", user.isMfaEnabled()));
+			}).orElseGet(() -> {
+				logger.warn("[AppSec] Usuário do token não encontrado no DB: {}", email);
+				return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("message", "Usuário não encontrado."));
+			});
+		} catch (Exception e) {
+			logger.error("[AppSec-Critico] Falha no Toggle MFA: ", e);
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+					.body("Erro interno ao processar a solicitação de MFA.");
+		}
 	}
 	
 	/**
@@ -181,6 +186,8 @@ public class AuthController {
 	 */
 	private ResponseEntity<LoginResponseDTO> generateFullAuthResponse(String email) {
 		String accessToken = jwtService.generateToken(email);
+		User user = userRepository.findByEmail(email)
+				.orElseThrow(() -> new RuntimeException("Usuário não encontrado para gerar refresh token."));
 		RefreshToken refreshToken = refreshTokenService.createRefreshToken(email);
 		return ResponseEntity.ok(LoginResponseDTO.success(accessToken, refreshToken.getToken()));
 	}

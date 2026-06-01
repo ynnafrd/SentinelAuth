@@ -11,79 +11,67 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * RefreshTokenService - Rotação de Tokens de Segurança (RTR)
+ * Implementação robusta contra ataques de reutilização e falhas de rollback transacional.
+ */
 @Service
 public class RefreshTokenService {
-	
-	@Value("${jwt.refreshExpiration}")
-	private Long refreshTokenDurationMs;
-	
-	private final RefreshTokenRepository refreshTokenRepository;
-	private final UserRepository userRepository;
-	
-	public RefreshTokenService(RefreshTokenRepository refreshTokenRepository, UserRepository userRepository) {
-		this.refreshTokenRepository = refreshTokenRepository;
-		this.userRepository = userRepository;
-	}
-	
-	public RefreshToken findByToken(String token) {
-		return refreshTokenRepository.findByToken(token)
-				.orElseThrow(() -> new TokenRefreshException(token, "Refresh token não encontrado no banco de dados."));
-	}
-	
-	/**
-	 * Cria um novo Refresh Token.
-	 * AppSec: Garante que tokens antigos do usuário sejam removidos (Single Session enforcement opcional)
-	 * ou apenas cria um novo para rotação.
-	 */
-	public RefreshToken createRefreshToken(String email) {
-		RefreshToken refreshToken = new RefreshToken();
-		
-		refreshToken.setUser(userRepository.findByEmail(email).get());
-		refreshToken.setExpiryDate(Instant.now().plusMillis(refreshTokenDurationMs));
-		refreshToken.setToken(UUID.randomUUID().toString());
-		
-		return refreshTokenRepository.save(refreshToken);
-	}
-	
-	/**
-	 * Verifica se o token expirou.
-	 */
-	public RefreshToken verifyExpiration(RefreshToken token) {
-		if (token.getExpiryDate().compareTo(Instant.now()) < 0) {
-			refreshTokenRepository.delete(token);
-			throw new TokenRefreshException(token.getToken(), "Refresh token expirado. Por favor, faça login novamente.");
-		}
-		return token;
-	}
-	
-	/**
-	 * TOKEN ROTATION: Implementação de Segurança.
-	 * Verifica o token antigo, deleta-o e gera um novo imediatamente.
-	 * Isso previne reutilização de tokens vazados.
-	 */
-	@Transactional
-	public RefreshToken rotateToken(String requestTokenStr) {
-		// 1. Busca o token no banco
-		RefreshToken oldToken = findByToken(requestTokenStr);
-		
-		// 2. Verifica validade
-		verifyExpiration(oldToken);
-		
-		// 3. Captura o usuário dono do token
-		var user = oldToken.getUser();
-		
-		// 4. DELETA o token antigo (Rotação)
-		refreshTokenRepository.delete(oldToken);
-		
-		// 5. Força a escrita imediata para evitar Unique Key Violation na criação do novo token
-		refreshTokenRepository.flush();
-		
-		// 6. Gera um NOVO token para o usuário
-		return createRefreshToken(user.getEmail());
-	}
-	
-	@Transactional
-	public int deleteByUserId(String email) {
-		return refreshTokenRepository.deleteByUser(userRepository.findByEmail(email).get());
-	}
+
+    @Value("${jwt.refreshExpiration}")
+    private Long refreshTokenDurationMs;
+
+    private final RefreshTokenRepository refreshTokenRepository;
+    private final UserRepository userRepository;
+
+    public RefreshTokenService(RefreshTokenRepository refreshTokenRepository, UserRepository userRepository) {
+        this.refreshTokenRepository = refreshTokenRepository;
+        this.userRepository = userRepository;
+    }
+
+    public RefreshToken findByToken(String token) {
+        return refreshTokenRepository.findByToken(token)
+                .orElseThrow(() -> new TokenRefreshException(token, "Refresh token não encontrado."));
+    }
+
+    public RefreshToken createRefreshToken(String email) {
+        RefreshToken refreshToken = new RefreshToken();
+        refreshToken.setUser(userRepository.findByEmail(email).get());
+        refreshToken.setExpiryDate(Instant.now().plusMillis(refreshTokenDurationMs));
+        refreshToken.setToken(UUID.randomUUID().toString());
+        refreshToken.setUsed(false);
+        refreshToken.setRevoked(false);
+
+        return refreshTokenRepository.save(refreshToken);
+    }
+
+    /**
+     * TOKEN ROTATION (RTR) com Detecção de Abuso persistente.
+     */
+    @Transactional(noRollbackFor = SecurityException.class) // Garante que a revogação seja salva mesmo se lançar erro!
+    public RefreshToken rotateToken(String requestTokenStr) {
+        RefreshToken oldToken = findByToken(requestTokenStr);
+        
+        // 1. Detecção de Reutilização (Breach Detection)
+        if (oldToken.isUsed() || oldToken.isRevoked()) {
+            // Se o token já foi usado, assumimos comprometimento de sessão.
+            // Revogamos todas as sessões ativas do usuário imediatamente!
+            refreshTokenRepository.revokeAllUserTokens(oldToken.getUser());
+            throw new SecurityException("Alerta de Segurança: Tentativa de reutilização de Refresh Token detectada. Todas as sessões do usuário foram invalidadas!");
+        }
+
+        // 2. Verifica se o token expirou
+        if (oldToken.getExpiryDate().isBefore(Instant.now())) {
+            oldToken.setRevoked(true);
+            refreshTokenRepository.save(oldToken);
+            throw new TokenRefreshException(oldToken.getToken(), "Refresh token expirado.");
+        }
+
+        // 3. Marca o token antigo como usado de forma definitiva
+        oldToken.setUsed(true);
+        refreshTokenRepository.saveAndFlush(oldToken); // Força a gravação imediata no banco
+
+        // 4. Retorna um novo token ativo
+        return createRefreshToken(oldToken.getUser().getEmail());
+    }
 }

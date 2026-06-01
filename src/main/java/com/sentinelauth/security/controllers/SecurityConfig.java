@@ -66,6 +66,9 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/refresh").permitAll()
                         .requestMatchers("/h2-console/**").permitAll() // Apenas para ambiente de desenvolvimento
                         
+                        //Rotas de MFA (Exigem autentificação explícita sem JWT, pois são parte do processo de login)
+                        .requestMatchers("/api/auth/mfa/verify").authenticated()
+                        .requestMatchers("/api/auth/mfa/toggle").authenticated()
                         // Rotas protegidas (Exigem JWT)
                         .anyRequest().authenticated()
                 );

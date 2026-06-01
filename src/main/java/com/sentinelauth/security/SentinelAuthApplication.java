@@ -30,10 +30,6 @@ public class SentinelAuthApplication {
 		SpringApplication.run(SentinelAuthApplication.class, args);
 	}
 	
-	/**
-	 * AppSec: Garantir que a aplicação use UTC de forma consistente.
-	 * Ter um fuso horário consistente é crucial para a auditoria de logs (Incident Response).
-	 */
 	@PostConstruct
 	public void init() {
 		TimeZone.setDefault(TimeZone.getTimeZone("UTC"));

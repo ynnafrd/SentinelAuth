@@ -7,9 +7,13 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -32,57 +36,67 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 	private static final Pattern JWT_STRICT_PATTERN = Pattern.compile("([A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+)");
 	
 	private final JwtService jwtService;
+	private final UserDetailsService userDetailsService;
 	
 	@Autowired
-	public JwtAuthenticationFilter(JwtService jwtService) {
+	public JwtAuthenticationFilter(JwtService jwtService, @Lazy UserDetailsService userDetailsService) {
 		this.jwtService = jwtService;
+		this.userDetailsService = userDetailsService;
 	}
 	
 	@Override
 	protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
-				throws ServletException, IOException {
+			throws ServletException, IOException {
 		
 		final String authHeader = request.getHeader("Authorization");
+		final String jwt;
+		final String userEmail;
 		
+		// Se não houver cabeçalho ou se não começar com Bearer, segue o fluxo normalmente
 		if (authHeader == null || !authHeader.startsWith("Bearer ")) {
 			filterChain.doFilter(request, response);
 			return;
 		}
 		
 		try {
-			String rawValue = authHeader.substring(7).trim(); // Remove espaços acidentais
-			Matcher matcher = JWT_STRICT_PATTERN.matcher(rawValue);
+			jwt = authHeader.substring(7);
 			
-			if (matcher.find()) {
-				String jwt = matcher.group(1);
-				
-				String userEmail = null;
-				try {
-					userEmail = jwtService.extractUsername(jwt);
-				} catch (Exception e) {
-					logger.warn("[AppSec] Falha ao extrair usuário do token: {}", e.getMessage());
-				}
-				
-				if (userEmail != null && SecurityContextHolder.getContext().getAuthentication() == null) {
-					if (jwtService.isTokenValid(jwt)) {
-						UsernamePasswordAuthenticationToken authToken = new UsernamePasswordAuthenticationToken(
-							userEmail, null, Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER")));
-						
-						authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-						SecurityContextHolder.getContext().setAuthentication(authToken);
-					}
-				}
-			} else {
-				logger.warn("[AppSec] Formato JWT inválido detectado no Header.");
+			// AppSec Check: Se o token for a string literal do Postman, ignora de forma limpa
+			if (jwt.equals("{{sentinel_jwt}}") || jwt.trim().isEmpty()) {
+				logger.warn("[AppSec-Filtro] Token inválido ou não resolvido enviado pelo cliente.");
+				filterChain.doFilter(request, response);
+				return;
 			}
 			
+			userEmail = jwtService.extractUsername(jwt);
+			
+			if (userEmail != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+				try {
+					UserDetails userDetails = this.userDetailsService.loadUserByUsername(userEmail);
+					
+					if (jwtService.isTokenValid(jwt) && userEmail.equals(userDetails.getUsername())) {
+						UsernamePasswordAuthenticationToken authToken = new UsernamePasswordAuthenticationToken(
+								userDetails, null, userDetails.getAuthorities()
+						);
+						authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+						SecurityContextHolder.getContext().setAuthentication(authToken);
+						logger.info("[AppSec-Filtro] Utilizador {} autenticado com sucesso no contexto.", userEmail);
+					} else {
+						logger.warn("[AppSec-Filtro] Token inválido ou e-mail divergente para o utilizador: {}", userEmail);
+					}
+				} catch (UsernameNotFoundException unfe) {
+					logger.error("[AppSec-Filtro] O utilizador '{}' extraído do JWT não existe no UserDetailsService atual. " +
+							"Verifique se o CustomUserDetailsService está ativo e a ler da base de dados H2.", userEmail);
+				}
+			}
 		} catch (Exception e) {
-			logger.error("[AppSec] Falha no filtro de autenticação: {}", e.getMessage());
-			SecurityContextHolder.clearContext();
+			// Captura falhas estruturais de parse de JWT malformado, evitando quebras inesperadas
+			logger.error("[AppSec-Filtro] Erro estrutural ao processar assinatura do token JWT: {}", e.getMessage(), e);
 		}
 		
 		filterChain.doFilter(request, response);
 	}
+	
 	
 	private String getCharCodes(String str) {
 		return str.chars()

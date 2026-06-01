@@ -33,9 +33,6 @@ public class User {
 	@Column(name = "mfa_enabled")
 	private boolean mfaEnabled = false;
 	
-	@Column(name = "mfa_secret")
-	private String mfaSecret; // Chave secreta Base32 para o Google Authenticator
-	
 	// Construtores
 	public User() {}
 	
@@ -56,6 +53,4 @@ public class User {
 	
 	public boolean isMfaEnabled() { return mfaEnabled; }
 	public void setMfaEnabled(boolean mfaEnabled) { this.mfaEnabled = mfaEnabled; }
-	public String getMfaSecret() { return mfaSecret; }
-	public void setMfaSecret(String mfaSecret) { this.mfaSecret = mfaSecret; }
 }
