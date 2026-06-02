@@ -17,6 +17,7 @@ import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+import com.sentinelauth.security.events.SentinelAuditEvent;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -37,11 +38,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 	
 	private final JwtService jwtService;
 	private final UserDetailsService userDetailsService;
+	private final AuditPublisher auditPublisher;
 	
 	@Autowired
-	public JwtAuthenticationFilter(JwtService jwtService, @Lazy UserDetailsService userDetailsService) {
+	public JwtAuthenticationFilter(JwtService jwtService, @Lazy UserDetailsService userDetailsService, AuditPublisher auditPublisher) {
 		this.jwtService = jwtService;
 		this.userDetailsService = userDetailsService;
+		this.auditPublisher = auditPublisher;
 	}
 	
 	@Override
@@ -91,6 +94,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 			}
 		} catch (Exception e) {
 			// Captura falhas estruturais de parse de JWT malformado, evitando quebras inesperadas
+			auditPublisher.publish("INVALID_TOKEN_ATTEMPT", "ANONYMOUS", "Tentativa de acesso com assinatura de token JWT inválida");
 			logger.error("[AppSec-Filtro] Erro estrutural ao processar assinatura do token JWT: {}", e.getMessage(), e);
 		}
 		

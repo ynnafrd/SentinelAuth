@@ -3,6 +3,7 @@ package com.sentinelauth.security.controllers;
 import com.sentinelauth.security.dto.UserResponseDTO;
 import com.sentinelauth.security.model.User;
 import com.sentinelauth.security.repository.UserRepository;
+import com.sentinelauth.security.services.AuditPublisher;
 import com.sentinelauth.security.services.UserService;
 import com.sentinelauth.security.dto.UserRegistrationDTO;
 import jakarta.servlet.http.HttpServletRequest;
@@ -14,6 +15,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.web.bind.annotation.*;
+import com.sentinelauth.security.services.AuditPublisher;
 
 import java.util.stream.Collectors;
 
@@ -27,12 +29,14 @@ public class UserController {
 	
 	private static final Logger logger = LoggerFactory.getLogger(UserController.class);
 	
+	private final AuditPublisher auditPublisher;
 	private final UserService userService;
 	private final UserRepository userRepository;
 	
-	public UserController(UserService userService, UserRepository userRepository) {
+	public UserController(UserService userService, UserRepository userRepository , AuditPublisher auditPublisher) {
 		this.userService = userService;
 		this.userRepository = userRepository;
+		this.auditPublisher = auditPublisher; // Injeção via construtor
 	}
 	
 	@PostMapping("/register")
@@ -40,6 +44,7 @@ public class UserController {
 		logger.info("[AppSec] Tentativa de registro: {}", registrationDTO.getEmail());
 		User user = userService.registerUser(registrationDTO);
 		UserResponseDTO response = new UserResponseDTO(user.getId(), user.getEmail(), user.getRole());
+		auditPublisher.publish("USER_REGISTRATION", user.getEmail(),"Registro de novo usuário");
 		return ResponseEntity.status(HttpStatus.CREATED).body(response);
 	}
 	

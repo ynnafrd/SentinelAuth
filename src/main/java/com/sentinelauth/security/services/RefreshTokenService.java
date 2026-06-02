@@ -7,6 +7,7 @@ import com.sentinelauth.security.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.sentinelauth.security.services.AuditPublisher;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -21,12 +22,14 @@ public class RefreshTokenService {
     @Value("${jwt.refreshExpiration}")
     private Long refreshTokenDurationMs;
 
+    private final AuditPublisher auditPublisher; // Para publicar eventos de auditoria
     private final RefreshTokenRepository refreshTokenRepository;
     private final UserRepository userRepository;
 
-    public RefreshTokenService(RefreshTokenRepository refreshTokenRepository, UserRepository userRepository) {
+    public RefreshTokenService(RefreshTokenRepository refreshTokenRepository, UserRepository userRepository, AuditPublisher auditPublisher) {
         this.refreshTokenRepository = refreshTokenRepository;
         this.userRepository = userRepository;
+        this.auditPublisher = auditPublisher;
     }
 
     public RefreshToken findByToken(String token) {
@@ -56,6 +59,7 @@ public class RefreshTokenService {
         if (oldToken.isUsed() || oldToken.isRevoked()) {
             // Se o token já foi usado, assumimos comprometimento de sessão.
             // Revogamos todas as sessões ativas do usuário imediatamente!
+            auditPublisher.publish("TOKEN_REUSED", oldToken.getUser().getEmail(), "Tentativa de reutilização de Refresh Token detectada.");
             refreshTokenRepository.revokeAllUserTokens(oldToken.getUser());
             throw new SecurityException("Alerta de Segurança: Tentativa de reutilização de Refresh Token detectada. Todas as sessões do usuário foram invalidadas!");
         }

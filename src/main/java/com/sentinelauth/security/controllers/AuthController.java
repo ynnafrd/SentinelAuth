@@ -1,12 +1,11 @@
 package com.sentinelauth.security.controllers;
 
-import com.sentinelauth.security.services.RateLimitingService;
+import com.sentinelauth.security.events.SentinelAuditEvent;
+import com.sentinelauth.security.services.*;
 import com.sentinelauth.security.dto.LoginRequestDTO;
 import com.sentinelauth.security.model.RefreshToken;
 import com.sentinelauth.security.model.User;
 import com.sentinelauth.security.repository.UserRepository;
-import com.sentinelauth.security.services.JwtService;
-import com.sentinelauth.security.services.RefreshTokenService;
 import io.github.bucket4j.Bucket;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -17,8 +16,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 import com.sentinelauth.security.dto.LoginResponseDTO;
-import com.sentinelauth.security.services.MfaService;
-import com.sentinelauth.security.services.EmailService;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -26,6 +23,8 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
+	
+	private final AuditPublisher auditPublisher;
 	
 	Bucket bucket = new RateLimitingService().resolveBucket("localhost");
 	private static final Logger logger = LoggerFactory.getLogger(AuthController.class);
@@ -39,8 +38,9 @@ public class AuthController {
 	private final EmailService emailService;
 	
 	
-	public AuthController(MfaService mfaService, UserRepository userRepository, PasswordEncoder passwordEncoder,
+	public AuthController(AuditPublisher auditPublisher, MfaService mfaService, UserRepository userRepository, PasswordEncoder passwordEncoder,
 	                      JwtService jwtService, RefreshTokenService refreshTokenService, RateLimitingService rateLimitingService, EmailService emailService) {
+		this.auditPublisher = auditPublisher;
 		this.mfaService = mfaService;
 		this.userRepository = userRepository;
 		this.passwordEncoder = passwordEncoder;
@@ -55,6 +55,7 @@ public class AuthController {
 	                               @RequestHeader(value = "X-Forwarded-For", defaultValue = "unknown") String ip) {
 		
 		if (!rateLimitingService.resolveBucket(ip).tryConsume(1)) {
+			auditPublisher.publish("LOGIN_RATE_LIMITED", loginRequest.getEmail(), "Tentativa de login limitada por excesso de requisições.");
 			return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body("Muitas tentativas. Tente novamente em 1 minuto.");
 		}
 		
@@ -64,11 +65,16 @@ public class AuthController {
 						if (user.isMfaEnabled()) {
 							String code = mfaService.generateEmailCode(user.getEmail());
 							emailService.sendMfaCode(user.getEmail(), code);
+							auditPublisher.publish("MFA_CODE_SENT", user.getEmail(), "Código MFA enviado por email.");
 							String tempToken = jwtService.generateToken(user.getEmail());
+							auditPublisher.publish("LOGIN_SUCCESS", user.getEmail(),"Autenticação em primeiro fator concluída");
 							return ResponseEntity.ok(LoginResponseDTO.mfaPending(tempToken));
 						}
+						auditPublisher.publish("LOGIN_SUCCESS", user.getEmail(), "Autenticação bem-sucedida sem MFA");
 						return generateFullAuthResponse(user.getEmail());
+						
 					}
+					auditPublisher.publish("LOGIN_FAILED", loginRequest.getEmail(), "Tentativa de login falhou por credenciais invalidas. (senha/email incorretos)");
 					return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Credenciais inválidas.");
 				})
 				.orElse(ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Credenciais inválidas."));
@@ -147,9 +153,11 @@ public class AuthController {
 			String email = jwtService.extractUsername(tempToken);
 			
 			if (mfaService.verifyCode(email, code)) {
+				auditPublisher.publish("MFA_SUCCESS", email, "MFA validado com sucesso.");
 				logger.info("[AppSec] MFA validado com sucesso para: {}", email);
 				return generateFullAuthResponse(email);
 			}
+			auditPublisher.publish("MFA_FAILED", email, "Tentativa de MFA falhou.");
 			return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Código inválido ou expirado.");
 		} catch (Exception e) {
 			return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Sessão temporária inválida.");
